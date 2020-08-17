@@ -36,13 +36,58 @@ unique_ptr<CFG> CFGBuilder::buildFor(core::Context ctx, ast::MethodDef &md) {
                                          selfClaz.data(ctx)->enclosingClass(ctx).data(ctx)->selfType(ctx),
                                          core::Names::cast()));
 
+        BasicBlock *presentCont = entry;
+        BasicBlock *defaultCont = nullptr;
+
+        auto &argInfos = md.symbol.data(ctx)->arguments();
         int i = -1;
         for (auto &argExpr : md.args) {
             i++;
             auto *a = ast::MK::arg2Local(argExpr);
-            synthesizeExpr(entry, res->enterLocal(a->localVariable), a->loc, make_unique<LoadArg>(md.symbol, i));
+            auto local = res->enterLocal(a->localVariable);
+
+            // If this is a keyword argument, we can no longer make the assumption that processing one default arg
+            // means the remaining will all be defaulted; join together the present and defaulted branches, to force
+            // explicit checks for all remaining keyword arguments.
+            if (argInfos[i].flags.isKeyword && nullptr != defaultCont) {
+                auto *join = res->freshBlock(cctx.loops, presentCont->rubyBlockId);
+                unconditionalJump(presentCont, join, *res, core::LocOffsets::none());
+                unconditionalJump(defaultCont, join, *res, core::LocOffsets::none());
+                presentCont = join;
+                defaultCont = nullptr;
+            }
+
+            // Only emit conditional arg loading if the arg has a default
+            if (auto *opt = ast::cast_tree<ast::OptionalArg>(argExpr)) {
+                auto *presentNext = res->freshBlock(cctx.loops, presentCont->rubyBlockId);
+                auto *defaultNext = res->freshBlock(cctx.loops, presentCont->rubyBlockId);
+
+                auto present = cctx.newTemporary(core::Names::argPresent());
+                synthesizeExpr(presentCont, present, a->loc, make_unique<ArgPresent>(md.symbol, i));
+                conditionalJump(presentCont, present, presentNext, defaultNext, *res, a->loc);
+
+                if (defaultCont) {
+                    unconditionalJump(defaultCont, defaultNext, *res, a->loc);
+                }
+
+                defaultNext = walk(cctx.withTarget(local), *opt->default_, defaultNext);
+
+                presentCont = presentNext;
+                defaultCont = defaultNext;
+            }
+
+            synthesizeExpr(presentCont, local, a->loc, make_unique<LoadArg>(md.symbol, i));
         }
-        cont = walk(cctx.withTarget(retSym), md.rhs.get(), entry);
+
+        // Join the presentCont and defaultCont paths together
+        if (defaultCont) {
+            auto *join = res->freshBlock(cctx.loops, presentCont->rubyBlockId);
+            unconditionalJump(presentCont, join, *res, core::LocOffsets::none());
+            unconditionalJump(defaultCont, join, *res, core::LocOffsets::none());
+            presentCont = join;
+        }
+
+        cont = walk(cctx.withTarget(retSym), md.rhs.get(), presentCont);
     }
     // Past this point, res->localVariables is a fixed size.
 

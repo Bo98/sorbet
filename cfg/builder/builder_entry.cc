@@ -45,11 +45,12 @@ unique_ptr<CFG> CFGBuilder::buildFor(core::Context ctx, ast::MethodDef &md) {
             i++;
             auto *a = ast::MK::arg2Local(argExpr);
             auto local = res->enterLocal(a->localVariable);
+            auto &info = argInfos[i];
 
             // If this is a keyword argument, we can no longer make the assumption that processing one default arg
             // means the remaining will all be defaulted; join together the present and defaulted branches, to force
             // explicit checks for all remaining keyword arguments.
-            if (argInfos[i].flags.isKeyword && nullptr != defaultCont) {
+            if (info.flags.isKeyword && nullptr != defaultCont) {
                 auto *join = res->freshBlock(cctx.loops, presentCont->rubyBlockId);
                 unconditionalJump(presentCont, join, *res, core::LocOffsets::none());
                 unconditionalJump(defaultCont, join, *res, core::LocOffsets::none());
@@ -70,7 +71,16 @@ unique_ptr<CFG> CFGBuilder::buildFor(core::Context ctx, ast::MethodDef &md) {
                     unconditionalJump(defaultCont, defaultNext, *res, a->loc);
                 }
 
-                defaultNext = walk(cctx.withTarget(local), *opt->default_, defaultNext);
+                // Walk the default, and check the type of its final value
+                auto tmp = cctx.newTemporary(core::Names::castTemp());
+                defaultNext = walk(cctx.withTarget(tmp), *opt->default_, defaultNext);
+
+                if (info.type) {
+                    defaultNext->exprs.emplace_back(local, opt->default_.get()->loc,
+                                                    make_unique<Cast>(tmp, info.type, core::Names::let()));
+                } else {
+                    defaultNext->exprs.emplace_back(local, opt->default_.get()->loc, make_unique<Ident>(tmp));
+                }
 
                 presentCont = presentNext;
                 defaultCont = defaultNext;

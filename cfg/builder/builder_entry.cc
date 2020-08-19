@@ -60,6 +60,8 @@ unique_ptr<CFG> CFGBuilder::buildFor(core::Context ctx, ast::MethodDef &md) {
 
             // Only emit conditional arg loading if the arg has a default
             if (auto *opt = ast::cast_tree<ast::OptionalArg>(argExpr)) {
+                auto defLoc = opt->default_->loc;
+
                 auto *presentNext = res->freshBlock(cctx.loops, presentCont->rubyBlockId);
                 auto *defaultNext = res->freshBlock(cctx.loops, presentCont->rubyBlockId);
 
@@ -72,15 +74,17 @@ unique_ptr<CFG> CFGBuilder::buildFor(core::Context ctx, ast::MethodDef &md) {
                 }
 
                 // Walk the default, and check the type of its final value
-                auto tmp = cctx.newTemporary(core::Names::castTemp());
-                defaultNext = walk(cctx.withTarget(tmp), *opt->default_, defaultNext);
+                auto result = cctx.newTemporary(core::Names::statTemp());
+                defaultNext = walk(cctx.withTarget(result), *opt->default_, defaultNext);
 
                 if (info.type) {
-                    defaultNext->exprs.emplace_back(local, opt->default_.get()->loc,
-                                                    make_unique<Cast>(tmp, info.type, core::Names::let()));
-                } else {
-                    defaultNext->exprs.emplace_back(local, opt->default_.get()->loc, make_unique<Ident>(tmp));
+                    auto tmp = cctx.newTemporary(core::Names::castTemp());
+                    defaultNext->exprs.emplace_back(tmp, defLoc,
+                                                    make_unique<Cast>(result, info.type, core::Names::let()));
+                    result = tmp;
                 }
+
+                defaultNext->exprs.emplace_back(local, defLoc, make_unique<Ident>(result));
 
                 presentCont = presentNext;
                 defaultCont = defaultNext;
